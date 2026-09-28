@@ -759,7 +759,6 @@ internal extension FTPFileProvider {
                                 let totalsent = sent
                                 let sentbytes = Int64(subdata.count)
                                 onProgress?(sentbytes, totalsent, size)
-                                print("ftp", filePath, dataTask.countOfBytesSent, dataTask.countOfBytesExpectedToSend, totalsent)
                             }
                             lock.unlock()
                             group.leave()
@@ -880,7 +879,6 @@ internal extension FTPFileProvider {
                 let waitResult = group.wait(timeout: .now() + timeout)
                 
                 if let error = error {
-                    print(error.localizedDescription)
                     completionHandler(error)
                     return
                 }

@@ -8,6 +8,56 @@
 
 import Foundation
 
+// Stream delegates require a live run loop, but scheduling them on the main run loop
+// makes TLS evaluation and stream teardown part of the app's UI responsiveness path.
+private final class FileProviderStreamRunLoop {
+    private final class State {
+        let ready = DispatchSemaphore(value: 0)
+        var runLoop: RunLoop?
+    }
+
+    static let shared = FileProviderStreamRunLoop()
+
+    private let state: State
+    private let thread: Thread
+
+    private init() {
+        let state = State()
+        self.state = state
+        self.thread = Thread {
+            let runLoop = RunLoop.current
+            runLoop.add(Port(), forMode: .common)
+            state.runLoop = runLoop
+            state.ready.signal()
+
+            while !Thread.current.isCancelled {
+                autoreleasepool {
+                    _ = runLoop.run(mode: .default, before: .distantFuture)
+                }
+            }
+        }
+        thread.name = "FileProvider.StreamRunLoop"
+        thread.qualityOfService = .userInitiated
+        thread.start()
+        state.ready.wait()
+    }
+
+    func performAndWait(_ operation: @escaping () -> Void) {
+        guard Thread.current !== thread, let runLoop = state.runLoop else {
+            operation()
+            return
+        }
+
+        let completed = DispatchSemaphore(value: 0)
+        CFRunLoopPerformBlock(runLoop.getCFRunLoop(), RunLoop.Mode.common.rawValue as CFString) {
+            defer { completed.signal() }
+            operation()
+        }
+        CFRunLoopWakeUp(runLoop.getCFRunLoop())
+        completed.wait()
+    }
+}
+
 private var _lasttaskIdAssociated = 1_000_000_000
 let _lasttaskIdAssociated_lock: NSLock = NSLock()
 var lasttaskIdAssociated: Int {
@@ -440,15 +490,15 @@ public class FileProviderStreamTask: URLSessionTask, StreamDelegate {
         inputStream.delegate = self
         outputStream.delegate = self
         
-        #if swift(>=4.2)
-        inputStream.schedule(in: RunLoop.main, forMode: .common)
-        #else
-        inputStream.schedule(in: RunLoop.main, forMode: .commonModes)
-        #endif
-        //outputStream.schedule(in: RunLoop.main, forMode: .init("kCFRunLoopDefaultMode"))
-        
-        inputStream.open()
-        outputStream.open()
+        FileProviderStreamRunLoop.shared.performAndWait {
+            #if swift(>=4.2)
+            inputStream.schedule(in: RunLoop.current, forMode: .common)
+            #else
+            inputStream.schedule(in: RunLoop.current, forMode: .commonModes)
+            #endif
+            inputStream.open()
+            outputStream.open()
+        }
         
         if self._state == .suspended {
             dispatch_queue.resume()
@@ -853,9 +903,9 @@ extension FileProviderStreamTask {
         }
         
         if close {
-            DispatchQueue.main.sync {
+            FileProviderStreamRunLoop.shared.performAndWait {
                 outputStream.close()
-                shouldCloseWrite = true
+                self.shouldCloseWrite = true
             }
             self.streamDelegate?.urlSession?(self._underlyingSession, writeClosedFor: self)
         }
@@ -868,21 +918,18 @@ extension FileProviderStreamTask {
         inputStream?.delegate = nil
         outputStream?.delegate = nil
         
-        inputStream?.close()
-        #if swift(>=4.2)
-        inputStream?.remove(from: RunLoop.main, forMode: .common)
-        #else
-        inputStream?.remove(from: RunLoop.main, forMode: .commonModes)
-        #endif
-        inputStream = nil
-        
-        outputStream?.close()
-        #if swift(>=4.2)
-        outputStream?.remove(from: RunLoop.main, forMode: .common)
-        #else
-        outputStream?.remove(from: RunLoop.main, forMode: .commonModes)
-        #endif
-        outputStream = nil
+        FileProviderStreamRunLoop.shared.performAndWait {
+            self.inputStream?.close()
+            #if swift(>=4.2)
+            self.inputStream?.remove(from: RunLoop.current, forMode: .common)
+            #else
+            self.inputStream?.remove(from: RunLoop.current, forMode: .commonModes)
+            #endif
+            self.inputStream = nil
+
+            self.outputStream?.close()
+            self.outputStream = nil
+        }
     }
     
 }
